@@ -1,17 +1,27 @@
 import asyncio
+import dataclasses
+import functools
 import io
 import json
+import pathlib
+import traceback
 import uuid
+from ast import Call
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from importlib import resources
 
-app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+import websockets.typing
+from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 pages: "dict[str, type[Page]]" = {}
 
 
 def read_static(filename: str) -> str:
-    return resources.files("hyprtxt.static").joinpath(filename).read_text()
+    return (
+        pathlib.Path(str(resources.files("hyprtxt"))) / "static" / filename
+    ).read_text()
 
 
 STATIC = {
@@ -19,91 +29,6 @@ STATIC = {
     "main.css": read_static("main.css"),
     "main.js": read_static("main.js"),
 }
-
-
-@app.middleware("http")
-async def clear_and_set_csp(request, call_next):
-    response = await call_next(request)
-    if "content-security-policy" in response.headers:
-        del response.headers["content-security-policy"]
-
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:"
-    )
-    return response
-
-
-@app.websocket("/_hyprtxt/ws")
-async def ws(websocket: WebSocket):
-    await websocket.accept()
-
-    path = await websocket.receive_text()
-
-    if path in pages or "*" in pages:
-        await websocket.send_text(
-            json.dumps({"pathmsg": "success", "error_pretty": ""})
-        )
-    else:
-        await websocket.send_text(
-            json.dumps(
-                {
-                    "pathmsg": "unknown",
-                    "error_pretty": f'Path not found on server for "{path}"',
-                }
-            )
-        )
-        return
-
-    try:
-        page = pages[path](path, websocket)
-    except KeyError:
-        page = pages["*"](path, websocket)
-
-    asyncio.create_task(page.setup_page())
-
-    while True:
-        try:
-            payload = json.loads(await websocket.receive_text())
-        except WebSocketDisconnect:
-            break
-
-        match payload.get("type", "ping"):
-            case "ping":
-                continue
-            case "triggered":
-                asyncio.create_task(page._rec_action(payload["id"], payload["action"]))
-            case "query_response":
-                qid = payload.get("query_id")
-                if qid in page._pending_requests:
-                    page._pending_requests[qid].set_result(payload.get("data"))
-                    del page._pending_requests[qid]
-            case "got_text":
-                req_id = payload.get("request_id")
-                if req_id in page._pending_requests:
-                    page._pending_requests[req_id].set_result(payload.get("content"))
-                    del page._pending_requests[req_id]
-            case "got_prop":
-                req_id = payload.get("request_id")
-                if req_id in page._pending_requests:
-                    page._pending_requests[req_id].set_result(payload.get("content"))
-                    del page._pending_requests[req_id]
-
-
-@app.get("/_hyprtxt/main.js")
-async def _():
-    return Response(STATIC["main.js"], media_type="text/javascript")
-
-
-@app.get("/_hyprtxt/main.css")
-async def _():
-    return Response(STATIC["main.css"], media_type="text/css")
-
-
-@app.get("/{full_path:path}")
-async def all_pages_html(full_path):
-    return HTMLResponse(
-        STATIC["default.html"].replace("${noscript-err}", full_path),
-    )
 
 
 class Element:
@@ -163,7 +88,7 @@ class Element:
 
 
 class Page:
-    def __init__(self, path: str, ws: WebSocket) -> None:
+    def __init__(self, path: str, ws: websockets.ServerConnection) -> None:
         self.path = path
         self._hooks: dict[str, dict[str, Callable[[str, str], Awaitable[None]]]] = {}
         self._ws = ws
@@ -179,7 +104,7 @@ class Page:
             self._hooks[id] = {}
 
         self._hooks[id][action] = func
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps(
                 {
                     "type": "add_filter",
@@ -198,7 +123,7 @@ class Page:
         await func(id, action)
 
     async def add_child(self, content: str | Element, below: str = "body"):
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps(
                 {
                     "type": "add_child",
@@ -211,7 +136,7 @@ class Page:
         )
 
     async def set_text(self, id: str, content: str):
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps({"type": "set_text", "id": id, "content": content})
         )
 
@@ -220,7 +145,7 @@ class Page:
         future = asyncio.get_event_loop().create_future()
         self._pending_requests[request_id] = future
 
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps({"type": "get_text", "id": id, "request_id": request_id})
         )
 
@@ -232,7 +157,7 @@ class Page:
         future = loop.create_future()
         self._pending_requests[request_id] = future
 
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps(
                 {"type": "get_prop", "id": id, "prop": prop, "request_id": request_id}
             )
@@ -240,7 +165,7 @@ class Page:
         return await future
 
     async def set_prop(self, id: str, prop: str, value):
-        await self._ws.send_text(
+        await self._ws.send(
             json.dumps({"type": "set_prop", "id": id, "prop": prop, "value": value})
         )
 
@@ -251,3 +176,138 @@ class Page:
             style_string = str(style)
 
         await self.add_child(Element("style", style_string), "head")
+
+
+@dataclass
+class Content:
+    string: bytes | str | BaseException
+    status_code: int = 200
+    headers: dict[str, str] = dataclasses.field(default_factory=lambda: dict())
+
+
+class Provider:
+    def __init__(self, get_path: Callable[[str], Content], priority: int = 100) -> None:
+        if priority < 0:
+            raise ValueError("cannot have priority less than zero")
+
+        self.get_path = get_path
+        self.priority = priority
+        self.sub_providers: list[Provider] = []
+
+
+def run_app(providers: list[Provider], *, host: str = "0.0.0.0", port: int = 7777):
+    asyncio.run(_run(providers, host, port))
+
+
+async def _run(providers: list[Provider], host: str, port: int):
+    async def _procreq_wrapper(conn, req):
+        return await _process_request(providers, conn, req)
+
+    providers_s = sorted(providers, key=lambda x: -x.priority)
+    providers = []
+
+    for provider in providers_s:
+        providers.append(provider)
+        providers.extend(getattr(provider, "sub_providers", []))
+
+    async with serve(
+        handler=_handle_ws,
+        host=host,
+        port=port,
+        process_request=_procreq_wrapper,
+    ) as server:
+        proc = server.serve_forever()
+
+        await proc
+
+
+async def _handle_ws(websocket: websockets.ServerConnection):
+    path = str(await websocket.recv())
+
+    if path in pages or "*" in pages:
+        await websocket.send(json.dumps({"pathmsg": "success", "error_pretty": ""}))
+    else:
+        await websocket.send(
+            json.dumps(
+                {
+                    "pathmsg": "unknown",
+                    "error_pretty": f'Path not found on server for "{path}"',
+                }
+            )
+        )
+        return
+
+    try:
+        page = pages[path](path, websocket)
+    except KeyError:
+        page = pages["*"](path, websocket)
+
+    asyncio.create_task(page.setup_page())
+
+    try:
+        async for raw in websocket:
+            payload = json.loads(raw)
+
+            match payload.get("type", "ping"):
+                case "ping":
+                    continue
+                case "triggered":
+                    asyncio.create_task(
+                        page._rec_action(payload["id"], payload["action"])
+                    )
+                case "query_response":
+                    qid = payload.get("query_id")
+                    if qid in page._pending_requests:
+                        page._pending_requests[qid].set_result(payload.get("data"))
+                        del page._pending_requests[qid]
+                case "got_text":
+                    req_id = payload.get("request_id")
+                    if req_id in page._pending_requests:
+                        page._pending_requests[req_id].set_result(
+                            payload.get("content")
+                        )
+                        del page._pending_requests[req_id]
+                case "got_prop":
+                    req_id = payload.get("request_id")
+                    if req_id in page._pending_requests:
+                        page._pending_requests[req_id].set_result(
+                            payload.get("content")
+                        )
+                        del page._pending_requests[req_id]
+    except ConnectionClosed:
+        pass
+
+
+async def _process_request(
+    providers: list[Provider],
+    connection: websockets.ServerConnection,
+    request: websockets.Request,
+) -> websockets.Response | None:
+    if request.path.strip("/") == "_hyprtxt/ws":
+        return
+    for prov in providers:
+        content = prov.get_path(request.path)
+        if content is None:
+            continue
+
+        if isinstance(content.string, BaseException):
+            into = io.StringIO()
+            traceback.print_exception(content.string, file=into)
+
+            string = into.getvalue().encode()
+        elif isinstance(content.string, str):
+            string = content.string.encode(errors="replace")
+        elif isinstance(content.string, bytes):
+            string = content.string
+        else:
+            string = bytes(content.string)
+
+        return websockets.Response(
+            content.status_code, "", websockets.Headers(**content.headers), string
+        )
+
+    else:
+        error = "no providers for the request, make sure there is at least one with a catch-all"
+        return websockets.Response(
+            500, error, websockets.Headers(), body=error.encode()
+        )

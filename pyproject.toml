@@ -1,11 +1,11 @@
 [project]
 name = "hyprtxt"
 version = "0.1.2"
-description = "a cool web framework i cooked up in a few hours"
+description = "a cool web framework i cooked up"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "websockets>=16.0",
+    "websockets>=16.0,<0.17",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
