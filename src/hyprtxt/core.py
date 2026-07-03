@@ -1,17 +1,14 @@
 import asyncio
 import dataclasses
-import functools
 import io
 import json
 import pathlib
 import traceback
 import uuid
-from ast import Call
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from importlib import resources
 
-import websockets.typing
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
