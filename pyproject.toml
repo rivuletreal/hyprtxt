@@ -5,7 +5,7 @@ description = "a cool web framework i cooked up"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "websockets>=16.0,<0.17",
+    "websockets>=16.0,<17.0",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
