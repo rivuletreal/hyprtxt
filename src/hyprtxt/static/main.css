@@ -1,0 +1,16 @@
+body {
+    background-color: #222;
+    color: #fff;
+    font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+}
+
+#error {
+    text-align: center;
+    text-decoration: underline mediumvioletred;
+}
+
+#app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+}
