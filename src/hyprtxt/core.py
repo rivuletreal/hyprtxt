@@ -1,15 +1,11 @@
 import asyncio
 import io
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-
-try:
-    import orjson as json
-except ImportError:
-    import json
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -377,8 +373,8 @@ STATIC = {
     };
 
     socket.onmessage = async (event) => {
-      const text = await event.data.text;
-      let msg = JSON.parse(text);
+    const text = typeof event.data === "string" ? event.data : await event.data.text();
+     let msg = JSON.parse(text);
 
       if (isPathMsg) {
         isPathMsg = false;
