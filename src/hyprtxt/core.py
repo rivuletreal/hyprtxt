@@ -377,7 +377,7 @@ STATIC = {
     };
 
     socket.onmessage = async (event) => {
-      const text = await event.data.text();
+      const text = await event.data.text;
       let msg = JSON.parse(text);
 
       if (isPathMsg) {
@@ -504,8 +504,7 @@ async def clear_and_set_csp(request, call_next):
         del response.headers["content-security-policy"]
 
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self' 'unsafe-inline'; "
-        "connect-src 'self' wss: ws://localhost:8000 ws://127.0.0.1:8000;"
+        "default-src 'self' 'unsafe-inline'; connect-src 'self' wss: ws:"
     )
     return response
 
@@ -517,11 +516,11 @@ async def ws(websocket: WebSocket):
     path = await websocket.receive_text()
 
     if path in pages or "*" in pages:
-        await websocket.send_bytes(
+        await websocket.send_text(
             json.dumps({"pathmsg": "success", "error_pretty": ""})
         )
     else:
-        await websocket.send_bytes(
+        await websocket.send_text(
             json.dumps(
                 {
                     "pathmsg": "unknown",
@@ -656,7 +655,7 @@ class Page:
             self._hooks[id] = {}
 
         self._hooks[id][action] = func
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps(
                 {
                     "type": "add_filter",
@@ -675,7 +674,7 @@ class Page:
         await func(id, action)
 
     async def add_child(self, content: str | Element, below: str = "body"):
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps(
                 {
                     "type": "add_child",
@@ -688,7 +687,7 @@ class Page:
         )
 
     async def set_text(self, id: str, content: str):
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps({"type": "set_text", "id": id, "content": content})
         )
 
@@ -697,7 +696,7 @@ class Page:
         future = asyncio.get_event_loop().create_future()
         self._pending_requests[request_id] = future
 
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps({"type": "get_text", "id": id, "request_id": request_id})
         )
 
@@ -709,7 +708,7 @@ class Page:
         future = loop.create_future()
         self._pending_requests[request_id] = future
 
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps(
                 {"type": "get_prop", "id": id, "prop": prop, "request_id": request_id}
             )
@@ -717,7 +716,7 @@ class Page:
         return await future
 
     async def set_prop(self, id: str, prop: str, value):
-        await self._ws.send_bytes(
+        await self._ws.send_text(
             json.dumps({"type": "set_prop", "id": id, "prop": prop, "value": value})
         )
 
